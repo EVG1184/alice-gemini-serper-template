@@ -4,7 +4,7 @@ export const config = {
 };
 
 // ЖЁСТКИЕ НАСТРОЙКИ (без переменных окружения для модели)
-const MODEL_NAME = "gemini-1.5-flash"; 
+const MODEL_NAME = "gemini-1.5-flash-lite"; 
 const TOTAL_RESPONSE_BUDGET_MS = 2800; // Безопасный предел для Яндекса
 const SERPER_TIMEOUT_MS = 800;
 const GEMINI_TIMEOUT_MS = 1800;
