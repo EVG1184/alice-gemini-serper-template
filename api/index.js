@@ -3,11 +3,11 @@ export const config = {
   runtime: 'edge',
 };
 
-// ЖЁСТКИЕ НАСТРОЙКИ (без переменных окружения для модели)
+// ЖЁСТКИЕ НАСТРОЙКИ (с увеличенным временем для поиска)
 const MODEL_NAME = "gemini-3.5-flash-lite"; 
-const TOTAL_RESPONSE_BUDGET_MS = 2800; // Безопасный предел для Яндекса
-const SERPER_TIMEOUT_MS = 800;
-const GEMINI_TIMEOUT_MS = 1800;
+const TOTAL_RESPONSE_BUDGET_MS = 2850; 
+const SERPER_TIMEOUT_MS = 1400; // Увеличили с 800 до 1400 мс!
+const GEMINI_TIMEOUT_MS = 1400;
 const MAX_HISTORY_MESSAGES = 4;
 const MAX_HISTORY_MESSAGE_CHARS = 1000;
 const MAX_ALICE_TEXT = 1024;
@@ -32,6 +32,7 @@ function fitAliceText(value) {
 }
 
 function isSearchIntent(text) {
+  // Убраны \b, чтобы русские слова находились идеально
   return /сегодня|сейчас|последн|новост|погод|курс валют|найди|поищи|актуальн|сколько стоит/i.test(text);
 }
 
@@ -100,15 +101,14 @@ async function askGemini(text, history, searchContext, timeoutMs) {
     : text;
   contents.push({ role: "user", parts: [{ text: prompt }] });
 
-  // Жёстко вшитая ссылка. Исключает влияние любых левых настроек на Vercel.
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${key}`;
   console.log(`[DEBUG] Запрос к Gemini URL: ${url}`);
 
   const { response, data } = await fetchJson(
     url,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
         contents,
@@ -123,7 +123,6 @@ async function askGemini(text, history, searchContext, timeoutMs) {
     console.error(`[DEBUG] Ошибка Google API: Статус ${status}`, JSON.stringify(data));
     if (status === 400) throw new Error("GEMINI_BAD_REQUEST");
     if (status === 404) throw new Error("GEMINI_NOT_FOUND");
-    if (status === 403) throw new Error("GEMINI_FORBIDDEN");
     throw new Error("GEMINI_REQUEST_FAILED");
   }
 
@@ -160,7 +159,7 @@ export default async function handler(req) {
     let searchContext = "";
     if (isSearchIntent(text) && process.env.SERPER_API_KEY) {
       console.log("[DEBUG] Начинаем поиск Serper...");
-      searchContext = await searchWeb(text, Math.min(SERPER_TIMEOUT_MS, remainingMs() - 1500));
+      searchContext = await searchWeb(text, Math.min(SERPER_TIMEOUT_MS, remainingMs() - 1000));
     }
 
     console.log(`[DEBUG] Идем в Gemini. Осталось времени: ${remainingMs()}ms`);
@@ -178,7 +177,6 @@ export default async function handler(req) {
     if (error.message.includes("EXHAUSTED") || error.message.includes("AbortError")) errMsg = "Извините, не успела найти информацию.";
     if (error.message === "GEMINI_NOT_FOUND") errMsg = "Не найдена модель нейросети.";
     if (error.message === "GEMINI_BAD_REQUEST") errMsg = "Неверный формат запроса к нейросети.";
-    if (error.message === "GEMINI_FORBIDDEN") errMsg = "Ключ API отклонен, проверьте настройки доступа.";
 
     return new Response(JSON.stringify(aliceResponse(errMsg, false, oldHistory)), {
       status: 200, headers: { "Content-Type": "application/json" }
