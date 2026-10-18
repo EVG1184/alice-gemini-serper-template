@@ -3,18 +3,16 @@ const MAX_HISTORY_MESSAGES = 6;
 const MAX_HISTORY_MESSAGE_CHARS = 800;
 const MAX_ALICE_TEXT = 1024;
 
-// Жесткий тайм-бюджет: Яндекс Диалоги обрывают связь через ~3300-3500 мс.
-const TOTAL_RESPONSE_BUDGET_MS = 3100;
+const TOTAL_RESPONSE_BUDGET_MS = 4200; 
 const SERPER_TIMEOUT_MS = 1100;
-const GEMINI_TIMEOUT_MS = 1800;
+const GEMINI_TIMEOUT_MS = 2800;
 
 const SYSTEM_PROMPT = [
   "Ты — полезный голосовой помощник в навыке Яндекс Алисы.",
-  "Отвечай естественно, по-русски, лаконично и так, чтобы ответ было удобно слушать ухом.",
-  "Обязательно используй не более 1–3 коротких предложений. Категорически не используй Markdown (**жирный**, курсив, решетки), списки с дефисами или длинные вступления.",
-  "Если вопрос требует актуальных данных и переданы результаты поиска, опирайся на них; не выдумывай отсутствующие факты.",
-  "Ты умеешь искать информацию в интернете. Никогда не говори «у меня нет доступа к свежим новостям» или «я языковая модель». Если пользователь спрашивает новости или события, кратко перескажи переданные факты поиска.",
-  "Если не знаешь ответа или поиск ничего не вернул, честно и кратко скажи об этом."
+  "Отвечай естественно, по-русски и СТРОГО КРАТКО (не более 1-3 предложений).",
+  "Если пользователь спрашивает новости: выбери только ОДНУ самую главную новость из результатов поиска и расскажи её кратко. Не перечисляй несколько новостей.",
+  "НИКОГДА не используй Markdown, звездочки, решетки или списки — ответ будет зачитан голосом. Пиши только обычными буквами.",
+  "Никогда не говори «у меня нет доступа к новостям». Если переданы результаты поиска, используй их."
 ].join(" ");
 
 function aliceResponse(text, endSession = false, history = []) {
@@ -30,11 +28,13 @@ function aliceResponse(text, endSession = false, history = []) {
 
 function fitAliceText(value) {
   const text = String(value ?? "")
+    // Жестко вырезаем весь Markdown (звездочки, решетки, подчеркивания, скобки), из-за которых Алиса замолкает
+    .replace(/[*#_~`\[\]<>]/g, "")
     .replace(/[\r\n\t]+/g, " ")
     .replace(/\s{2,}/g, " ")
     .trim();
 
-  if (text.length <= MAX_ALICE_TEXT) return text || "Не удалось подготовить ответ.";
+  if (text.length <= MAX_ALICE_TEXT) return text || "Произошла ошибка.";
 
   const candidate = text.slice(0, MAX_ALICE_TEXT - 1);
   const sentenceEnd = Math.max(
@@ -42,14 +42,14 @@ function fitAliceText(value) {
     candidate.lastIndexOf("! "),
     candidate.lastIndexOf("? ")
   );
-  if (sentenceEnd >= 250) return candidate.slice(0, sentenceEnd + 1).trim();
+  if (sentenceEnd >= 300) return candidate.slice(0, sentenceEnd + 1).trim();
 
   const lastSpace = candidate.lastIndexOf(" ");
-  return (lastSpace > 150 ? candidate.slice(0, lastSpace) : candidate).trim() + "…";
+  return (lastSpace > 200 ? candidate.slice(0, lastSpace) : candidate).trim() + "…";
 }
 
 function isSearchIntent(text) {
-  return /\b(latest|today|current|news|weather|price|exchange rate|recent|search|look up)\b|сегодня|сейчас|последн|новост|погод|курс|доллар|евро|рубл|акци|найди|поищи|актуальн|сколько стоит|свежие данные|что произошло|счет матча/i.test(text);
+  return /\b(latest|today|current|news|weather|price|exchange rate|recent|search|look up)\b|сегодня|сейчас|последн|новост|погод|курс валют|найди|поищи|актуальн|сколько стоит|свежие данные/i.test(text);
 }
 
 function safeHistory(history) {
@@ -90,39 +90,25 @@ async function searchWeb(query, timeoutMs) {
       Math.min(SERPER_TIMEOUT_MS, timeoutMs)
     );
 
-    if (!response.ok) {
-      console.warn("Serper request failed with HTTP", response.status);
-      return "";
-    }
+    if (!response.ok) return "";
 
     const items = [];
-
-    // Читаем блок новостей, если Serper вернул ленту news
     if (Array.isArray(data.news)) {
-      for (const item of data.news.slice(0, 3)) {
-        const title = String(item.title || "").slice(0, 150);
-        const snippet = String(item.snippet || "").slice(0, 250);
-        items.push(`Новость: ${title}. ${snippet}`.trim());
+      for (const item of data.news.slice(0, 2)) {
+        items.push(`Новость: ${item.title || ""}. ${item.snippet || ""}`.trim());
       }
     }
-
-    // Если новостей нет, читаем органическую выдачу
     if (!items.length && Array.isArray(data.organic)) {
-      for (const item of data.organic.slice(0, 3)) {
-        const title = String(item.title || "").slice(0, 150);
-        const snippet = String(item.snippet || "").slice(0, 250);
-        items.push(`${title}: ${snippet}`.trim());
+      for (const item of data.organic.slice(0, 2)) {
+        items.push(`${item.title || ""}: ${item.snippet || ""}`.trim());
       }
     }
 
     const answerBox = data.answerBox?.answer || data.answerBox?.snippet;
-    if (answerBox) {
-      items.unshift(`Главный факт: ${String(answerBox).slice(0, 250)}`);
-    }
+    if (answerBox) items.unshift(`Главный факт: ${String(answerBox).slice(0, 200)}`);
 
     return items.length ? items.join("\n") : "";
   } catch (error) {
-    console.warn("Serper request did not finish in time; continuing without search.");
     return "";
   }
 }
@@ -133,15 +119,13 @@ async function askGemini(text, history, searchContext, timeoutMs) {
   if (timeoutMs < 250) throw new Error("TIME_BUDGET_EXHAUSTED");
 
   const model = String(process.env.GEMINI_MODEL || DEFAULT_MODEL).trim();
-  if (!/^[A-Za-z0-9._-]+$/.test(model)) throw new Error("INVALID_MODEL_NAME");
-
   const contents = safeHistory(history).map(item => ({
     role: item.role,
     parts: [{ text: item.text }]
   }));
 
   const prompt = searchContext
-    ? `${text}\n\nСвежие факты из поиска:\n${searchContext}\nОтветь строго кратко по этим фактам голосом, максимум в 2-3 предложениях.`
+    ? `${text}\n\nРезультаты поиска:\n${searchContext}\nИспользуй их для ответа.`
     : text;
   contents.push({ role: "user", parts: [{ text: prompt }] });
 
@@ -158,20 +142,14 @@ async function askGemini(text, history, searchContext, timeoutMs) {
         contents,
         generationConfig: {
           temperature: 0.5,
-          maxOutputTokens: 220
+          maxOutputTokens: 150 
         }
       })
     },
     Math.min(GEMINI_TIMEOUT_MS, timeoutMs)
   );
 
-  if (!response.ok) {
-    const status = Number(response.status);
-    console.error("Gemini request failed with HTTP", status);
-    if (status === 401 || status === 403) throw new Error("GEMINI_KEY_REJECTED");
-    if (status === 429) throw new Error("GEMINI_QUOTA");
-    throw new Error("GEMINI_REQUEST_FAILED");
-  }
+  if (!response.ok) throw new Error("GEMINI_REQUEST_FAILED");
 
   const candidate = data?.candidates?.[0];
   const answer = (candidate?.content?.parts || [])
@@ -179,83 +157,50 @@ async function askGemini(text, history, searchContext, timeoutMs) {
     .join("")
     .trim();
 
-  if (!answer) {
-    if (data?.promptFeedback?.blockReason) throw new Error("GEMINI_BLOCKED");
-    throw new Error("GEMINI_EMPTY_RESPONSE");
-  }
-
+  if (!answer) throw new Error("GEMINI_EMPTY_RESPONSE");
   return answer;
 }
 
 function errorForUser(error) {
   switch (error?.message) {
-    case "MISSING_GEMINI_KEY":
-      return "Сервер пока не настроен. Проверьте переменную GEMINI_API_KEY в настройках Vercel.";
-    case "GEMINI_KEY_REJECTED":
-      return "Не удалось подключиться к Gemini. Проверьте API-ключ в настройках Vercel.";
-    case "GEMINI_QUOTA":
-      return "Сейчас превышен лимит запросов к Gemini. Попробуйте немного позже.";
-    case "GEMINI_BLOCKED":
-      return "Я не смогла озвучить этот ответ из-за ограничений безопасности. Спросите иначе.";
     case "TIME_BUDGET_EXHAUSTED":
     case "AbortError":
-      return "Не успела получить ответ вовремя. Попробуйте спросить чуть короче.";
+      return "Увлеклась чтением новостей и не успела ответить. Спросите чуть конкретнее.";
     default:
-      return "Не удалось получить ответ от нейросети. Попробуйте ещё раз через секунду.";
+      return "Произошла ошибка при обращении к нейросети.";
   }
 }
 
 export default async function handler(req, res) {
-  if (req.method === "GET") {
-    return res.status(200).json({
-      ok: true,
-      service: "alice-gemini-serper",
-      message: "Webhook is ready. Yandex Dialogs should send POST requests to /api."
-    });
-  }
-
-  if (req.method !== "POST") {
-    res.setHeader("Allow", "GET, POST");
-    return res.status(405).json({ error: "Method not allowed" });
-  }
+  if (req.method === "GET") return res.status(200).json({ ok: true });
 
   const startedAt = Date.now();
   const remainingMs = () => TOTAL_RESPONSE_BUDGET_MS - (Date.now() - startedAt);
-  const body = req.body && typeof req.body === "object" ? req.body : {};
+  const body = req.body || {};
   const text = String(body?.request?.command || body?.request?.original_utterance || "").trim();
   const oldHistory = safeHistory(body?.state?.session?.history);
 
   if (!text) {
-    return res.status(200).json(aliceResponse(
-      "Привет! Я могу ответить на вопрос или найти актуальную информацию. Что хотите узнать?",
-      false,
-      oldHistory
-    ));
+    return res.status(200).json(aliceResponse("Привет! Что хочешь узнать?", false, oldHistory));
   }
 
   try {
     let searchContext = "";
     if (isSearchIntent(text) && process.env.SERPER_API_KEY) {
-      searchContext = await searchWeb(text, Math.min(SERPER_TIMEOUT_MS, Math.max(0, remainingMs() - 1700)));
+      searchContext = await searchWeb(text, Math.min(SERPER_TIMEOUT_MS, Math.max(0, remainingMs() - 2000)));
     }
 
     const answer = await askGemini(
       text,
       oldHistory,
       searchContext,
-      Math.max(0, Math.min(GEMINI_TIMEOUT_MS, remainingMs() - 250))
+      Math.max(0, Math.min(GEMINI_TIMEOUT_MS, remainingMs() - 200))
     );
 
-    const history = [
-      ...oldHistory,
-      { role: "user", text: text.slice(0, MAX_HISTORY_MESSAGE_CHARS) },
-      { role: "model", text: answer.slice(0, MAX_HISTORY_MESSAGE_CHARS) }
-    ].slice(-MAX_HISTORY_MESSAGES);
-
+    const history = [...oldHistory, { role: "user", text }, { role: "model", text: answer }].slice(-MAX_HISTORY_MESSAGES);
     return res.status(200).json(aliceResponse(answer, false, history));
   } catch (error) {
     const safeError = error?.message === "AbortError" ? "TIME_BUDGET_EXHAUSTED" : error;
-    console.warn("Alice webhook returned a fallback response:", safeError?.message || "unknown error");
     return res.status(200).json(aliceResponse(errorForUser(safeError), false, oldHistory));
   }
 }
