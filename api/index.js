@@ -3,16 +3,12 @@ const MAX_HISTORY_MESSAGES = 6;
 const MAX_HISTORY_MESSAGE_CHARS = 800;
 const MAX_ALICE_TEXT = 1000;
 
-// Строгие лимиты Яндекса (отключение происходит на 3000 мс)
-const TOTAL_RESPONSE_BUDGET_MS = 2800; 
-const SERPER_TIMEOUT_MS = 1100;
-const GEMINI_TIMEOUT_MS = 1500;
+// ЖЕСТКИЕ ЛИМИТЫ (Гарантия ответа Алисы без зависаний)
+const YANDEX_MAX_TIME_MS = 2200; // Ровно 2.2 секунды на всё
+const SERPER_TIMEOUT_MS = 600;
+const GEMINI_TIMEOUT_MS = 1400;
 
-const SYSTEM_PROMPT = [
-  "Ты — умный голосовой помощник Алиса.",
-  "Отвечай по-русски, естественно, красиво и содержательно. Твой текст зачитывает робот, поэтому пиши только обычные слова и знаки препинания (без Markdown, звездочек и эмодзи).",
-  "Числа и аббревиатуры старайся писать словами для правильного произношения."
-].join(" ");
+const SYSTEM_PROMPT = "Ты — Алиса. Отвечай прямо, по фактам. НИКАКИХ извинений, НИКОГДА не говори 'Извините, но я не могу'. Запрещены Markdown, звездочки и эмодзи. Отвечай в 1-2 предложениях.";
 
 function aliceResponse(text, endSession = false, history = []) {
   return {
@@ -33,12 +29,12 @@ function fitAliceText(value) {
     .replace(/\s{2,}/g, " ")
     .trim();
 
-  if (text.length <= MAX_ALICE_TEXT) return text || "Я ничего не придумала.";
+  if (text.length <= MAX_ALICE_TEXT) return text || "Я не смогла подготовить ответ.";
   return text.slice(0, MAX_ALICE_TEXT - 3).trim() + "...";
 }
 
 function isSearchIntent(text) {
-  return /\b(latest|today|current|news|weather|recent|search)\b|сегодня|сейчас|последн|новост|погод|курс валют|найди|поищи/i.test(text);
+  return /\b(новост|сегодня|сейчас|найди|поищи|что нового|расскажи)\b/i.test(text);
 }
 
 function safeHistory(history) {
@@ -51,54 +47,47 @@ function safeHistory(history) {
 
 async function fetchJson(url, options, timeoutMs) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), Math.max(100, timeoutMs));
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(url, { ...options, signal: controller.signal });
     const data = await response.json().catch(() => ({}));
     return { response, data };
+  } catch (error) {
+    return { error: true };
   } finally {
     clearTimeout(timer);
   }
 }
 
-async function searchWeb(query, timeoutMs) {
+async function searchWeb(query) {
   const key = process.env.SERPER_API_KEY;
-  if (!key || timeoutMs < 200) return "NO_KEY";
+  if (!key) return "";
 
-  try {
-    const { response, data } = await fetchJson(
-      "https://google.serper.dev/search",
-      {
-        method: "POST",
-        headers: { "X-API-KEY": key, "Content-Type": "application/json" },
-        body: JSON.stringify({ q: query, gl: "ru", hl: "ru", num: 3 })
-      },
-      timeoutMs
-    );
+  const { response, data, error } = await fetchJson(
+    "https://google.serper.dev/search",
+    {
+      method: "POST",
+      headers: { "X-API-KEY": key, "Content-Type": "application/json" },
+      body: JSON.stringify({ q: query, gl: "ru", hl: "ru", num: 2 }) // Берем только 2 ссылки для скорости
+    },
+    SERPER_TIMEOUT_MS
+  );
 
-    if (!response.ok) return "ERROR";
+  if (error || !response?.ok) return "";
 
-    const items = [];
-    if (Array.isArray(data.news)) {
-      for (const item of data.news.slice(0, 3)) {
-        items.push(`Новость: ${item.title || ""}. ${item.snippet || ""}`.trim());
-      }
-    }
-    if (!items.length && Array.isArray(data.organic)) {
-      for (const item of data.organic.slice(0, 3)) {
-        items.push(`${item.title || ""}: ${item.snippet || ""}`.trim());
-      }
-    }
-
-    return items.length ? items.join("\n") : "EMPTY";
-  } catch (error) {
-    return "TIMEOUT";
+  const items = [];
+  // Читаем ТОЛЬКО короткие заголовки, чтобы не тратить время нейросети
+  if (Array.isArray(data?.news)) {
+    for (const item of data.news.slice(0, 2)) items.push(`${item.title || ""}.`);
+  } else if (Array.isArray(data?.organic)) {
+    for (const item of data.organic.slice(0, 2)) items.push(`${item.title || ""}.`);
   }
+  return items.join(" ");
 }
 
-async function askGemini(text, history, searchContext, timeoutMs) {
+async function askGemini(text, history, searchContext) {
   const key = process.env.GEMINI_API_KEY;
-  if (!key) throw new Error("MISSING_GEMINI_KEY");
+  if (!key) return "Ключ Gemini не найден в настройках Vercel.";
   
   const contents = safeHistory(history).map(item => ({
     role: item.role,
@@ -106,15 +95,15 @@ async function askGemini(text, history, searchContext, timeoutMs) {
   }));
 
   let prompt = text;
-  if (searchContext === "TIMEOUT" || searchContext === "EMPTY" || searchContext === "ERROR") {
-    prompt = `${text}\n\n[ВНИМАНИЕ: Поиск в интернете не удался. Прямо скажи пользователю, что не смогла загрузить свежую информацию, и ответь только на основе своих базовых знаний, не придумывая новости.]`;
-  } else if (searchContext && searchContext !== "NO_KEY") {
-    prompt = `${text}\n\n[РЕЗУЛЬТАТЫ ПОИСКА В ИНТЕРНЕТЕ]:\n${searchContext}\n\n[ИНСТРУКЦИЯ]: Выбери 1-2 самые главные новости из текста выше и расскажи их связным текстом (2-4 предложения). Не обрывай фразу!`;
+  if (searchContext) {
+    prompt = `${text}\n[СВЕЖИЕ ФАКТЫ]: ${searchContext}\n[ПРАВИЛО]: Расскажи об этом ОДНИМ кратким предложением. НИКАКИХ ИЗВИНЕНИЙ.`;
+  } else {
+    prompt = `${text}\n[ПРАВИЛО]: Отвечай коротко. НИКАКИХ ИЗВИНЕНИЙ.`;
   }
   
   contents.push({ role: "user", parts: [{ text: prompt }] });
 
-  const { response, data } = await fetchJson(
+  const { response, data, error } = await fetchJson(
     `https://generativelanguage.googleapis.com/v1beta/models/${DEFAULT_MODEL}:generateContent`,
     {
       method: "POST",
@@ -122,48 +111,49 @@ async function askGemini(text, history, searchContext, timeoutMs) {
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
         contents,
-        generationConfig: { temperature: 0.6, maxOutputTokens: 200 }
+        generationConfig: { temperature: 0.5, maxOutputTokens: 100 }, // Жесткий лимит на длину ответа
+        safetySettings: [ // Принудительно отключаем цензуру
+          { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
+          { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
+          { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
+          { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }
+        ]
       })
     },
-    Math.min(GEMINI_TIMEOUT_MS, timeoutMs)
+    GEMINI_TIMEOUT_MS
   );
 
-  if (!response.ok) throw new Error("GEMINI_REQUEST_FAILED");
+  if (error || !response?.ok) return "Произошла техническая заминка.";
 
-  const candidate = data?.candidates?.[0];
-  const answer = (candidate?.content?.parts || []).map(p => p.text || "").join("").trim();
-  
-  if (!answer) throw new Error("GEMINI_EMPTY_RESPONSE");
-  return answer;
+  const answer = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  return answer || "Я не знаю, что ответить.";
 }
 
 export default async function handler(req, res) {
-  if (req.method === "GET") return res.status(200).json({ ok: true });
+  if (req.method !== "POST") return res.status(200).json({ ok: true });
 
-  const startedAt = Date.now();
-  const remainingMs = () => TOTAL_RESPONSE_BUDGET_MS - (Date.now() - startedAt);
   const body = req.body || {};
   const text = String(body?.request?.command || body?.request?.original_utterance || "").trim();
   const oldHistory = safeHistory(body?.state?.session?.history);
 
   if (!text) {
-    return res.status(200).json(aliceResponse("Привет! Я на связи. Что хочешь узнать или найти?", false, oldHistory));
+    return res.status(200).json(aliceResponse("Привет! Что поискать?", false, oldHistory));
   }
 
-  try {
-    let searchContext = "";
-    if (isSearchIntent(text)) {
-      searchContext = await searchWeb(text, SERPER_TIMEOUT_MS);
-    }
+  // ГАРАНТИЯ ОТВЕТА: Этот таймер сработает ровно через 2.2 секунды, если нейросеть будет "тормозить"
+  const timeoutPromise = new Promise(resolve => 
+    setTimeout(() => resolve(aliceResponse("Новостей слишком много я не успела их прочитать. Спросите о чем то конкретном.", false, oldHistory)), YANDEX_MAX_TIME_MS)
+  );
 
-    const answer = await askGemini(text, oldHistory, searchContext, Math.max(500, remainingMs()));
+  const processPromise = (async () => {
+    const searchContext = isSearchIntent(text) ? await searchWeb(text) : "";
+    const answer = await askGemini(text, oldHistory, searchContext);
     
     const history = [...oldHistory, { role: "user", text }, { role: "model", text: answer }].slice(-MAX_HISTORY_MESSAGES);
-    return res.status(200).json(aliceResponse(answer, false, history));
-  } catch (error) {
-    const errText = error?.message === "AbortError" 
-      ? "Я немного задумалась и не успела подготовить ответ." 
-      : "Произошла ошибка при связи с нейросетью.";
-    return res.status(200).json(aliceResponse(errText, false, oldHistory));
-  }
+    return aliceResponse(answer, false, history);
+  })();
+
+  // Запускаем гонку: кто ответит первым (нейросеть или таймер-предохранитель), тот ответ и уйдет в колонку
+  const finalResult = await Promise.race([processPromise, timeoutPromise]);
+  return res.status(200).json(finalResult);
 }
