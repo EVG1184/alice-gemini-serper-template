@@ -3,17 +3,15 @@ const MAX_HISTORY_MESSAGES = 6;
 const MAX_HISTORY_MESSAGE_CHARS = 800;
 const MAX_ALICE_TEXT = 1024;
 
-const TOTAL_RESPONSE_BUDGET_MS = 4200; 
-const SERPER_TIMEOUT_MS = 1100;
-const GEMINI_TIMEOUT_MS = 2800;
+const TOTAL_RESPONSE_BUDGET_MS = 3800; 
+const SERPER_TIMEOUT_MS = 1000;
+const GEMINI_TIMEOUT_MS = 2500;
 
 const SYSTEM_PROMPT = [
-  "Ты — полезный голосовой помощник в навыке Яндекс Алисы.",
-  "Отвечай естественно, по-русски и СТРОГО КРАТКО (не более 1-3 предложений).",
-  "Если пользователь спрашивает новости: выбери только ОДНУ самую главную новость из результатов поиска и расскажи её кратко. Не перечисляй несколько новостей.",
-  "НИКОГДА не используй Markdown, звездочки, решетки, списки или URL-ссылки — ответ будет зачитан голосом.",
-  "КРИТИЧЕСКИ ВАЖНО: НИКОГДА НЕ ИСПОЛЬЗУЙ ЭМОДЗИ (смайлики). Из-за них колонка замолкает.",
-  "Никогда не говори «у меня нет доступа к новостям». Если переданы результаты поиска, используй их."
+  "Ты — умный голосовой помощник Алиса.",
+  "Отвечай по-русски, естественно, красиво и содержательно, как диктор на радио.",
+  "Если пользователь просит рассказать новости, тебе будут переданы результаты поиска. Выбери 2-3 интересные новости и расскажи их подробно, связным текстом. Ответ должен быть развернутым (4-6 предложений), а не обрываться на заголовке.",
+  "ЗАПРЕЩЕНО использовать маркдаун (звездочки, решетки) и ЛЮБЫЕ эмодзи/смайлики. Твой текст зачитывает синтезатор речи, пиши только слова и знаки препинания."
 ].join(" ");
 
 function aliceResponse(text, endSession = false, history = []) {
@@ -29,9 +27,7 @@ function aliceResponse(text, endSession = false, history = []) {
 
 function fitAliceText(value) {
   const text = String(value ?? "")
-    // Жестко вырезаем весь Markdown (звездочки, решетки, подчеркивания, скобки)
     .replace(/[*#_~`\[\]<>|]/g, "")
-    // Ядерный фильтр: вырезаем эмодзи и любые символы, кроме букв, цифр, пунктуации и пробелов
     .replace(/[^\p{L}\p{N}\p{P}\p{Z}]/gu, "")
     .replace(/[\r\n\t]+/g, " ")
     .replace(/\s{2,}/g, " ")
@@ -88,7 +84,7 @@ async function searchWeb(query, timeoutMs) {
           "X-API-KEY": key,
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({ q: query, gl: "ru", hl: "ru", num: 3 })
+        body: JSON.stringify({ q: query, gl: "ru", hl: "ru", num: 4 })
       },
       Math.min(SERPER_TIMEOUT_MS, timeoutMs)
     );
@@ -97,13 +93,13 @@ async function searchWeb(query, timeoutMs) {
 
     const items = [];
     if (Array.isArray(data.news)) {
-      for (const item of data.news.slice(0, 2)) {
-        items.push(`Новость: ${item.title || ""}. ${item.snippet || ""}`.trim());
+      for (const item of data.news.slice(0, 3)) {
+        items.push(`Новость: ${item.title || ""}. Подробности: ${item.snippet || ""}`.trim());
       }
     }
-    if (!items.length && Array.isArray(data.organic)) {
-      for (const item of data.organic.slice(0, 2)) {
-        items.push(`${item.title || ""}: ${item.snippet || ""}`.trim());
+    if (items.length < 2 && Array.isArray(data.organic)) {
+      for (const item of data.organic.slice(0, 3)) {
+        items.push(`Событие: ${item.title || ""}. Подробности: ${item.snippet || ""}`.trim());
       }
     }
 
@@ -128,7 +124,7 @@ async function askGemini(text, history, searchContext, timeoutMs) {
   }));
 
   const prompt = searchContext
-    ? `${text}\n\nРезультаты поиска:\n${searchContext}\nИспользуй их для ответа.`
+    ? `${text}\n\nРезультаты поиска:\n${searchContext}\nСоставь из них связный, подробный и интересный ответ.`
     : text;
   contents.push({ role: "user", parts: [{ text: prompt }] });
 
@@ -144,8 +140,8 @@ async function askGemini(text, history, searchContext, timeoutMs) {
         systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
         contents,
         generationConfig: {
-          temperature: 0.5,
-          maxOutputTokens: 150 
+          temperature: 0.6,
+          maxOutputTokens: 350 
         }
       })
     },
@@ -168,7 +164,7 @@ function errorForUser(error) {
   switch (error?.message) {
     case "TIME_BUDGET_EXHAUSTED":
     case "AbortError":
-      return "Увлеклась чтением новостей и не успела ответить. Спросите чуть конкретнее.";
+      return "Я нашла так много новостей, что не успела их прочитать. Спросите чуть конкретнее.";
     default:
       return "Произошла ошибка при обращении к нейросети.";
   }
