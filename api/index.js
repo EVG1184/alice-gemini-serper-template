@@ -2,9 +2,9 @@ const DEFAULT_MODEL = "gemini-3.5-flash-lite";
 const MAX_HISTORY_MESSAGES = 8;
 const MAX_HISTORY_MESSAGE_CHARS = 1200;
 const MAX_ALICE_TEXT = 1024;
-const TOTAL_RESPONSE_BUDGET_MS = 2500;
-const SERPER_TIMEOUT_MS = 400;
-const GEMINI_TIMEOUT_MS = 1600;
+const TOTAL_RESPONSE_BUDGET_MS = 1900;
+const SERPER_TIMEOUT_MS = 600;
+const GEMINI_TIMEOUT_MS = 1300;
 
 const SYSTEM_PROMPT = [
   "Ты — полезный голосовой помощник в навыке Яндекс Алисы.",
@@ -223,7 +223,7 @@ export default async function handler(req, res) {
     let searchContext = "";
     if (isSearchIntent(text) && process.env.SERPER_API_KEY) {
       // Search has a very short budget because Alice expects a response within 4.5 seconds.
-      searchContext = await searchWeb(text, Math.min(SERPER_TIMEOUT_MS, Math.max(0, remainingMs() - 1500)));
+      searchContext = await searchWeb(text, Math.min(SERPER_TIMEOUT_MS, Math.max(0, remainingMs() - 1000)));
     }
 
     const answer = await askGemini(
