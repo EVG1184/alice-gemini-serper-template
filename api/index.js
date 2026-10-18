@@ -1,18 +1,21 @@
-const DEFAULT_MODEL = "gemini-3.5-flash-lite";
-const MAX_HISTORY_MESSAGES = 8;
-const MAX_HISTORY_MESSAGE_CHARS = 1200;
+```javascript
+const DEFAULT_MODEL = "gemini-2.5-flash";
+const MAX_HISTORY_MESSAGES = 6;
+const MAX_HISTORY_MESSAGE_CHARS = 800;
 const MAX_ALICE_TEXT = 1024;
-const TOTAL_RESPONSE_BUDGET_MS = 3600;
-const SERPER_TIMEOUT_MS = 600;
-const GEMINI_TIMEOUT_MS = 2500;
+
+// Жесткий тайм-бюджет: Яндекс Диалоги обрывают связь через ~3300-3500 мс.
+const TOTAL_RESPONSE_BUDGET_MS = 3100;
+const SERPER_TIMEOUT_MS = 1100;
+const GEMINI_TIMEOUT_MS = 1800;
 
 const SYSTEM_PROMPT = [
   "Ты — полезный голосовой помощник в навыке Яндекс Алисы.",
-  "Отвечай естественно, по-русски, кратко и так, чтобы ответ было удобно слушать.",
-  "Обычно используй 1–3 коротких предложения. Не используй Markdown, таблицы, списки с символами или длинные вступления.",
+  "Отвечай естественно, по-русски, лаконично и так, чтобы ответ было удобно слушать ухом.",
+  "Обязательно используй не более 1–3 коротких предложений. Категорически не используй Markdown (**жирный**, курсив, решетки), списки с дефисами или длинные вступления.",
   "Если вопрос требует актуальных данных и переданы результаты поиска, опирайся на них; не выдумывай отсутствующие факты.",
-  "Ты умеешь искать информацию в интернете. Никогда не говори «у меня нет доступа к свежим новостям» или «я языковая модель». Если пользователь спрашивает новости или события, всегда делай поисковый запрос через Serper и кратко пересказывай найденное.",
-  "Если не знаешь ответа, честно скажи об этом."
+  "Ты умеешь искать информацию в интернете. Никогда не говори «у меня нет доступа к свежим новостям» или «я языковая модель». Если пользователь спрашивает новости или события, кратко перескажи переданные факты поиска.",
+  "Если не знаешь ответа или поиск ничего не вернул, честно и кратко скажи об этом."
 ].join(" ");
 
 function aliceResponse(text, endSession = false, history = []) {
@@ -40,14 +43,14 @@ function fitAliceText(value) {
     candidate.lastIndexOf("! "),
     candidate.lastIndexOf("? ")
   );
-  if (sentenceEnd >= 300) return candidate.slice(0, sentenceEnd + 1).trim();
+  if (sentenceEnd >= 250) return candidate.slice(0, sentenceEnd + 1).trim();
 
   const lastSpace = candidate.lastIndexOf(" ");
-  return (lastSpace > 200 ? candidate.slice(0, lastSpace) : candidate).trim() + "…";
+  return (lastSpace > 150 ? candidate.slice(0, lastSpace) : candidate).trim() + "…";
 }
 
 function isSearchIntent(text) {
-  return /\b(latest|today|current|news|weather|price|exchange rate|recent|search|look up)\b|сегодня|сейчас|последн|новост|погод|курс валют|найди|поищи|актуальн|сколько стоит|свежие данные/i.test(text);
+  return /\b(latest|today|current|news|weather|price|exchange rate|recent|search|look up)\b|сегодня|сейчас|последн|новост|погод|курс|доллар|евро|рубл|акци|найди|поищи|актуальн|сколько стоит|свежие данные|что произошло|счет матча/i.test(text);
 }
 
 function safeHistory(history) {
@@ -72,7 +75,7 @@ async function fetchJson(url, options, timeoutMs) {
 
 async function searchWeb(query, timeoutMs) {
   const key = process.env.SERPER_API_KEY;
-  if (!key || timeoutMs < 150) return "";
+  if (!key || timeoutMs < 200) return "";
 
   try {
     const { response, data } = await fetchJson(
@@ -93,17 +96,31 @@ async function searchWeb(query, timeoutMs) {
       return "";
     }
 
-    const items = (Array.isArray(data.organic) ? data.organic : [])
-      .slice(0, 3)
-      .map((item, i) => {
-        const title = String(item.title || "").slice(0, 180);
-        const snippet = String(item.snippet || "").slice(0, 350);
-        const link = String(item.link || "").slice(0, 240);
-        return `${i + 1}. ${title}: ${snippet} ${link}`.trim();
-      });
+    const items = [];
+
+    // Читаем блок новостей, если Serper вернул ленту news
+    if (Array.isArray(data.news)) {
+      for (const item of data.news.slice(0, 3)) {
+        const title = String(item.title || "").slice(0, 150);
+        const snippet = String(item.snippet || "").slice(0, 250);
+        items.push(`Новость: ${title}. ${snippet}`.trim());
+      }
+    }
+
+    // Если новостей нет, читаем органическую выдачу
+    if (!items.length && Array.isArray(data.organic)) {
+      for (const item of data.organic.slice(0, 3)) {
+        const title = String(item.title || "").slice(0, 150);
+        const snippet = String(item.snippet || "").slice(0, 250);
+        items.push(`${title}: ${snippet}`.trim());
+      }
+    }
 
     const answerBox = data.answerBox?.answer || data.answerBox?.snippet;
-    if (answerBox) items.unshift(`Краткий ответ поисковика: ${String(answerBox).slice(0, 350)}`);
+    if (answerBox) {
+      items.unshift(`Главный факт: ${String(answerBox).slice(0, 250)}`);
+    }
+
     return items.length ? items.join("\n") : "";
   } catch (error) {
     console.warn("Serper request did not finish in time; continuing without search.");
@@ -125,7 +142,7 @@ async function askGemini(text, history, searchContext, timeoutMs) {
   }));
 
   const prompt = searchContext
-    ? `${text}\n\nРезультаты поиска в интернете:\n${searchContext}\nИспользуй их только там, где они относятся к вопросу.`
+    ? `${text}\n\nСвежие факты из поиска:\n${searchContext}\nОтветь строго кратко по этим фактам голосом, максимум в 2-3 предложениях.`
     : text;
   contents.push({ role: "user", parts: [{ text: prompt }] });
 
@@ -142,7 +159,7 @@ async function askGemini(text, history, searchContext, timeoutMs) {
         contents,
         generationConfig: {
           temperature: 0.5,
-          maxOutputTokens: 240
+          maxOutputTokens: 220
         }
       })
     },
@@ -167,9 +184,7 @@ async function askGemini(text, history, searchContext, timeoutMs) {
     if (data?.promptFeedback?.blockReason) throw new Error("GEMINI_BLOCKED");
     throw new Error("GEMINI_EMPTY_RESPONSE");
   }
-  if (candidate?.finishReason === "MAX_TOKENS") {
-    console.warn("Gemini reached the output token limit.");
-  }
+
   return answer;
 }
 
@@ -182,12 +197,12 @@ function errorForUser(error) {
     case "GEMINI_QUOTA":
       return "Сейчас превышен лимит запросов к Gemini. Попробуйте немного позже.";
     case "GEMINI_BLOCKED":
-      return "Я не смогла обработать этот запрос. Попробуйте спросить иначе.";
+      return "Я не смогла озвучить этот ответ из-за ограничений безопасности. Спросите иначе.";
     case "TIME_BUDGET_EXHAUSTED":
     case "AbortError":
-      return "Не успела подготовить ответ. Попробуйте задать вопрос ещё раз, чуть короче.";
+      return "Не успела получить ответ вовремя. Попробуйте спросить чуть короче.";
     default:
-      return "Не получилось получить ответ от нейросети. Попробуйте ещё раз чуть позже.";
+      return "Не удалось получить ответ от нейросети. Попробуйте ещё раз через секунду.";
   }
 }
 
@@ -213,7 +228,7 @@ export default async function handler(req, res) {
 
   if (!text) {
     return res.status(200).json(aliceResponse(
-      "Привет! Я могу ответить на вопрос или найти актуальную информацию. Что хочешь узнать?",
+      "Привет! Я могу ответить на вопрос или найти актуальную информацию. Что хотите узнать?",
       false,
       oldHistory
     ));
@@ -222,15 +237,14 @@ export default async function handler(req, res) {
   try {
     let searchContext = "";
     if (isSearchIntent(text) && process.env.SERPER_API_KEY) {
-      // Search has a very short budget because Alice expects a response within 4.5 seconds.
-      searchContext = await searchWeb(text, Math.min(SERPER_TIMEOUT_MS, Math.max(0, remainingMs() - 2600)));
+      searchContext = await searchWeb(text, Math.min(SERPER_TIMEOUT_MS, Math.max(0, remainingMs() - 1700)));
     }
 
     const answer = await askGemini(
       text,
       oldHistory,
       searchContext,
-      Math.max(0, Math.min(GEMINI_TIMEOUT_MS, remainingMs() - 600))
+      Math.max(0, Math.min(GEMINI_TIMEOUT_MS, remainingMs() - 250))
     );
 
     const history = [
@@ -248,3 +262,4 @@ export default async function handler(req, res) {
 }
 
 export { aliceResponse, fitAliceText, isSearchIntent, safeHistory };
+```
