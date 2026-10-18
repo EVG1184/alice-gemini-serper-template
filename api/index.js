@@ -32,7 +32,7 @@ function fitAliceText(value) {
 }
 
 function isSearchIntent(text) {
-  return /\b(сегодня|сейчас|последн|новост|погод|курс валют|найди|поищи|актуальн|сколько стоит)\b/i.test(text);
+  return /сегодня|сейчас|последн|новост|погод|курс валют|найди|поищи|актуальн|сколько стоит/i.test(text);
 }
 
 function safeHistory(history) {
